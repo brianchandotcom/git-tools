@@ -122,6 +122,8 @@ import urllib2
 import urlparse
 import webbrowser
 
+from html.parser import HTMLParser
+from io import StringIO
 from string import Template
 from textwrap import fill
 
@@ -214,6 +216,18 @@ SCRIPT_NOTE = "GitPullRequest Script (by Liferay)"
 TMP_PATH = tempfile.gettempdir() + "/%s"
 
 MAP_RESPONSE = {}
+
+
+class MLStripper(HTMLParser):
+    def __init__(self):
+        self.reset()
+        self.text = StringIO()
+
+    def handle_data(self, d):
+        self.text.write(d)
+
+    def get_data(self):
+        return self.text.getvalue()
 
 
 def authorize_request(req, token=None, auth_type="token"):
@@ -1061,6 +1075,8 @@ def display_pull_request(pull_request):
             ]
 
             pr_body = "\n".join(pr_body)
+
+        pr_body = strip_html_tags(pr_body)
 
         print strip_empty_lines(pr_body)
 
@@ -1931,6 +1947,12 @@ def strip_empty_lines(text):
     while lines and not lines[-1].strip():
         lines.pop()
     return "\n".join(lines)
+
+
+def strip_html_tags(html):
+    stripper = MLStripper()
+    stripper.feed(html)
+    return stripper.get_data()
 
 
 def update_branch(branch_name):
