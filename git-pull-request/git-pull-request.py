@@ -107,23 +107,25 @@ Released under the MIT License.
 """
 
 import base64
+import codecs
 import getopt
+import getpass
 import json
 import os
 import re
 import sys
+import sys
+import tempfile
 import urllib
 import urllib2
 import urlparse
-import getpass
-import tempfile
 import webbrowser
 
 # import isodate
 # from datetime import date
 
-import codecs
-import sys
+from string import Template
+from textwrap import fill
 
 UTF8Writer = codecs.getwriter("utf8")
 sys.stdout = UTF8Writer(sys.stdout)
@@ -136,9 +138,6 @@ sys.stdout = UTF8Writer(sys.stdout)
 
 # socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "localhost", 8181)
 # socket.socket = socks.socksocket
-
-from textwrap import fill
-from string import Template
 
 options = {
     "debug-mode": False,
@@ -266,18 +265,6 @@ def build_pull_request_title(branch_name):
         branch_name = jira_ticket
 
     return branch_name
-
-
-def get_jira_ticket(text):
-    """Returns a JIRA ticket id from the passed text, or a blank string otherwise"""
-    m = re.search("[A-Z]{3,}-\d+", text)
-
-    jira_ticket = ""
-
-    if m != None and m.group(0) != "":
-        jira_ticket = m.group(0)
-
-    return jira_ticket
 
 
 def chdir(dir):
@@ -431,6 +418,38 @@ def command_alias(alias, githubname, filename):
     github_users_file.close()
 
 
+def command_close(repo_name, comment=None):
+    """Closes the current pull request on github with the optional comment, then
+    deletes the branch."""
+
+    print color_text("Closing pull request", "status")
+    print
+
+    branch_name = get_current_branch_name()
+    pull_request_ID = get_pull_request_ID(branch_name)
+    pull_request = get_pull_request(repo_name, pull_request_ID)
+
+    display_pull_request(pull_request)
+
+    close_pull_request(repo_name, pull_request_ID, comment)
+
+    update_branch_option = options["update-branch"]
+
+    ret = os.system("git checkout %s" % update_branch_option)
+    if ret != 0:
+        raise UserWarning("Could not checkout %s" % update_branch_option)
+
+    print color_text("Deleting branch %s" % branch_name, "status")
+    ret = os.system("git branch -D %s" % branch_name)
+    if ret != 0:
+        raise UserWarning("Could not delete branch")
+
+    print
+    print color_text("Pull request closed", "success")
+    print
+    display_status()
+
+
 def command_comment(repo_name, comment=None, pull_request_ID=None):
     if pull_request_ID is None:
         branch_name = get_current_branch_name()
@@ -440,6 +459,14 @@ def command_comment(repo_name, comment=None, pull_request_ID=None):
         post_comment(repo_name, pull_request_ID, comment)
     else:
         raise UserWarning("Please include a comment")
+
+
+def command_continue_update():
+    print color_text("Continuing update from %s" % options["update-branch"], "status")
+
+    continue_update()
+    print
+    display_status()
 
 
 def command_fetch(repo_name, pull_request_ID, auto_update=False):
@@ -477,46 +504,6 @@ def command_fetch(repo_name, pull_request_ID, auto_update=False):
 
     print
     print color_text("Fetch completed", "success")
-    print
-    display_status()
-
-
-def command_close(repo_name, comment=None):
-    """Closes the current pull request on github with the optional comment, then
-    deletes the branch."""
-
-    print color_text("Closing pull request", "status")
-    print
-
-    branch_name = get_current_branch_name()
-    pull_request_ID = get_pull_request_ID(branch_name)
-    pull_request = get_pull_request(repo_name, pull_request_ID)
-
-    display_pull_request(pull_request)
-
-    close_pull_request(repo_name, pull_request_ID, comment)
-
-    update_branch_option = options["update-branch"]
-
-    ret = os.system("git checkout %s" % update_branch_option)
-    if ret != 0:
-        raise UserWarning("Could not checkout %s" % update_branch_option)
-
-    print color_text("Deleting branch %s" % branch_name, "status")
-    ret = os.system("git branch -D %s" % branch_name)
-    if ret != 0:
-        raise UserWarning("Could not delete branch")
-
-    print
-    print color_text("Pull request closed", "success")
-    print
-    display_status()
-
-
-def command_continue_update():
-    print color_text("Continuing update from %s" % options["update-branch"], "status")
-
-    continue_update()
     print
     display_status()
 
@@ -663,6 +650,37 @@ def command_open(repo_name, pull_request_ID=None):
     open_URL(pull_request.get("html_url"))
 
 
+def command_pull(repo_name):
+    """Pulls changes from the remote branch into the local branch of the pull
+    request"""
+
+    branch_name = get_current_branch_name()
+
+    print color_text("Pulling remote changes into %s" % branch_name, "status")
+
+    pull_request_ID = get_pull_request_ID(branch_name)
+
+    pull_request = get_pull_request(repo_name, pull_request_ID)
+    repo_url = get_repo_url(pull_request, repo_name)
+
+    branch_name = build_branch_name(pull_request)
+    remote_branch_name = "refs/pull/%s/head" % pull_request["number"]
+
+    print color_text(
+        "Pulling from %s (%s)" % (repo_url, pull_request["head"]["ref"]), "status"
+    )
+
+    ret = os.system("git pull %s %s" % (repo_url, remote_branch_name))
+
+    if ret != 0:
+        raise UserWarning("Pull failed, resolve conflicts")
+
+    print
+    print color_text("Updating %s from remote completed" % branch_name, "success")
+    print
+    display_status()
+
+
 def command_show(repo_name):
     """List open pull requests
 
@@ -706,139 +724,6 @@ def command_show_alias(alias):
         print "The user alias %s points to %s " % user_item
     else:
         print "There is no user alias or github name matching %s in the current mapping file" % alias
-
-
-def get_pr_stats(repo_name, pull_request_ID):
-    if pull_request_ID != None:
-        try:
-            pull_request_ID = int(pull_request_ID)
-            pull_request = get_pull_request(repo_name, pull_request_ID)
-        except Exception, e:
-            pull_request = pull_request_ID
-
-        display_pull_request_minimal(pull_request)
-
-        branch_name = build_branch_name(pull_request)
-        ret = os.system("git show-ref --verify -q refs/heads/%s" % branch_name)
-
-        if ret != 0:
-            branch_name = fetch_pull_request(pull_request, repo_name)
-
-            ret = os.system("git show-ref --verify -q refs/heads/%s" % branch_name)
-
-            if ret != 0:
-                raise UserWarning("Fetch failed")
-
-        merge_base = (
-            os.popen("git merge-base %s %s" % (options["update-branch"], branch_name))
-            .read()
-            .strip()
-        )
-
-        shortstat = (
-            os.popen(
-                "git --no-pager diff --shortstat {0}..{1}".format(
-                    merge_base, branch_name
-                )
-            )
-            .read()
-            .strip()
-        )
-        stat_fragments = shortstat.split(", ")
-        stats_arr = shortstat.split(" ")
-
-        has_color = False
-        for index, frag in enumerate(stat_fragments):
-            color_type = None
-            if "changed" in frag:
-                color_type = "total"
-            elif "insertions" in frag:
-                color_type = "added"
-            elif "deletions" in frag:
-                color_type = "deleted"
-
-            if color_type:
-                has_color = True
-                stat_fragments[index] = color_text(frag, "stats-%s" % color_type)
-
-        if has_color:
-            shortstat = ", ".join(stat_fragments)
-
-        dels = 0
-        if len(stats_arr) > 5:
-            dels = int(stats_arr[5])
-
-        stats = (int(stats_arr[3]) + dels) / int(stats_arr[0])
-
-        stats = color_text(
-            "Average %d change(s) per file" % stats, "stats-average-change"
-        )
-
-        ret = (
-            os.popen(
-                "echo '{2}, {3}' && git diff --numstat --pretty='%H' --no-renames {0}..{1} | xargs -0n1 echo -n | cut -f 3- | sed -e 's/^.*\.\(.*\)$/\\1/' | sort | uniq -c | tr '\n' ',' | sed 's/,$//'".format(
-                    merge_base, branch_name, shortstat, stats
-                )
-            )
-            .read()
-            .strip()
-        )
-
-        print ret
-
-        stats_footer = options["stats-footer"]
-
-        if stats_footer:
-            committers = (
-                os.popen(
-                    "git log {0}..{1} --pretty='%an' --reverse | awk ' !x[$0]++'".format(
-                        merge_base, branch_name
-                    )
-                )
-                .read()
-                .strip()
-            )
-            committers = committers.split(os.linesep)
-            committers = ", ".join(committers)
-
-            fn = False
-
-            if stats_footer.startswith("`"):
-                stats_footer = stats_footer[1:]
-                fn = True
-
-            footer_tpl = Template(stats_footer)
-
-            committers = committers.decode("utf-8")
-
-            pr_obj = pull_request.copy()
-            pr_obj.update(
-                {
-                    "merge_base": merge_base[0:8],
-                    "branch_name": branch_name,
-                    "committers": committers,
-                    "NEWLINE": os.linesep,
-                }
-            )
-
-            footer_result = footer_tpl.safe_substitute(**pr_obj)
-
-            if fn:
-                footer_result = (
-                    os.popen(footer_result.encode("utf-8"))
-                    .read()
-                    .strip()
-                    .decode("utf-8")
-                )
-
-            print footer_result
-
-        print
-    else:
-        pull_requests = get_pull_requests(repo_name, options["filter-by-update-branch"])
-
-        for pull_request in pull_requests:
-            get_pr_stats(repo_name, pull_request)
 
 
 def command_submit(
@@ -1004,6 +889,10 @@ def command_update(repo_name, target=None):
     display_status()
 
 
+def command_update_meta():
+    update_meta()
+
+
 def command_update_users(
     filename, url=None, github_users=None, total_pages=0, all_pages=True
 ):
@@ -1084,80 +973,6 @@ def command_update_users(
     return github_users
 
 
-def get_user_email(github_user_info):
-    email = None
-
-    if "email" in github_user_info:
-        email = github_user_info["email"]
-
-        if email != None and email.endswith("@liferay.com"):
-            email = email[:-12]
-
-            if email.isdigit():
-                email = None
-        else:
-            email = None
-
-    if email == None:
-        if (
-            "name" in github_user_info
-            and github_user_info["name"] != None
-            and " " in github_user_info["name"]
-        ):
-            email = github_user_info["name"].lower()
-            email = email.replace(" ", ".")
-            email = email.replace("(", ".")
-            email = email.replace(")", ".")
-
-            email = re.sub("\.+", ".", email)
-
-            # Unicode characters usually do not appear in Liferay emails, so
-            # we'll replace them with the closest ASCII equivalent
-
-            email = email.replace(u"\u00e1", "a")
-            email = email.replace(u"\u00e3", "a")
-            email = email.replace(u"\u00e9", "e")
-            email = email.replace(u"\u00f3", "o")
-            email = email.replace(u"\u00fd", "y")
-            email = email.replace(u"\u0107", "c")
-            email = email.replace(u"\u010d", "c")
-            email = email.replace(u"\u0151", "o")
-            email = email.replace(u"\u0161", "s")
-
-    return email
-
-
-def command_pull(repo_name):
-    """Pulls changes from the remote branch into the local branch of the pull
-    request"""
-
-    branch_name = get_current_branch_name()
-
-    print color_text("Pulling remote changes into %s" % branch_name, "status")
-
-    pull_request_ID = get_pull_request_ID(branch_name)
-
-    pull_request = get_pull_request(repo_name, pull_request_ID)
-    repo_url = get_repo_url(pull_request, repo_name)
-
-    branch_name = build_branch_name(pull_request)
-    remote_branch_name = "refs/pull/%s/head" % pull_request["number"]
-
-    print color_text(
-        "Pulling from %s (%s)" % (repo_url, pull_request["head"]["ref"]), "status"
-    )
-
-    ret = os.system("git pull %s %s" % (repo_url, remote_branch_name))
-
-    if ret != 0:
-        raise UserWarning("Pull failed, resolve conflicts")
-
-    print
-    print color_text("Updating %s from remote completed" % branch_name, "success")
-    print
-    display_status()
-
-
 def complete_update(branch_name):
     update_branch_option = options["update-branch"]
 
@@ -1196,10 +1011,6 @@ def complete_update(branch_name):
     print color_text(
         "Updating %s from %s complete" % (branch_name, update_branch_option), "success"
     )
-
-
-def command_update_meta():
-    update_meta()
 
 
 def continue_update():
@@ -1341,6 +1152,10 @@ def fetch_pull_request(pull_request, repo_name):
     return branch_name
 
 
+def get_api_url(command):
+    return URL_BASE % command
+
+
 def get_current_branch_name(ensure_pull_request=True):
     """Returns the name of the current pull request branch"""
     branch_name = os.popen("git rev-parse --abbrev-ref HEAD").read().strip()
@@ -1368,6 +1183,18 @@ def get_git_base_path():
     return os.popen("git rev-parse --show-toplevel").read().strip()
 
 
+def get_jira_ticket(text):
+    """Returns a JIRA ticket id from the passed text, or a blank string otherwise"""
+    m = re.search("[A-Z]{3,}-\d+", text)
+
+    jira_ticket = ""
+
+    if m != None and m.group(0) != "":
+        jira_ticket = m.group(0)
+
+    return jira_ticket
+
+
 def get_original_dir_path():
     git_base_path = get_git_base_path()
 
@@ -1382,38 +1209,137 @@ def get_original_dir_path():
     return original_dir_path
 
 
-def get_work_dir():
-    global _work_dir
+def get_pr_stats(repo_name, pull_request_ID):
+    if pull_request_ID != None:
+        try:
+            pull_request_ID = int(pull_request_ID)
+            pull_request = get_pull_request(repo_name, pull_request_ID)
+        except Exception, e:
+            pull_request = pull_request_ID
 
-    if _work_dir == None:
-        symbolic_ref = (
-            os.popen("git symbolic-ref HEAD").read().strip().replace("refs/heads/", "")
+        display_pull_request_minimal(pull_request)
+
+        branch_name = build_branch_name(pull_request)
+        ret = os.system("git show-ref --verify -q refs/heads/%s" % branch_name)
+
+        if ret != 0:
+            branch_name = fetch_pull_request(pull_request, repo_name)
+
+            ret = os.system("git show-ref --verify -q refs/heads/%s" % branch_name)
+
+            if ret != 0:
+                raise UserWarning("Fetch failed")
+
+        merge_base = (
+            os.popen("git merge-base %s %s" % (options["update-branch"], branch_name))
+            .read()
+            .strip()
         )
-        work_dir_global = options["work-dir"]
 
-        work_dir_option = None
+        shortstat = (
+            os.popen(
+                "git --no-pager diff --shortstat {0}..{1}".format(
+                    merge_base, branch_name
+                )
+            )
+            .read()
+            .strip()
+        )
+        stat_fragments = shortstat.split(", ")
+        stats_arr = shortstat.split(" ")
 
-        if symbolic_ref:
-            work_dir_option = "work-dir-%s" % symbolic_ref
+        has_color = False
+        for index, frag in enumerate(stat_fragments):
+            color_type = None
+            if "changed" in frag:
+                color_type = "total"
+            elif "insertions" in frag:
+                color_type = "added"
+            elif "deletions" in frag:
+                color_type = "deleted"
 
-        if work_dir_option:
-            _work_dir = (
-                os.popen("git config git-pull-request.%s" % work_dir_option)
+            if color_type:
+                has_color = True
+                stat_fragments[index] = color_text(frag, "stats-%s" % color_type)
+
+        if has_color:
+            shortstat = ", ".join(stat_fragments)
+
+        dels = 0
+        if len(stats_arr) > 5:
+            dels = int(stats_arr[5])
+
+        stats = (int(stats_arr[3]) + dels) / int(stats_arr[0])
+
+        stats = color_text(
+            "Average %d change(s) per file" % stats, "stats-average-change"
+        )
+
+        ret = (
+            os.popen(
+                "echo '{2}, {3}' && git diff --numstat --pretty='%H' --no-renames {0}..{1} | xargs -0n1 echo -n | cut -f 3- | sed -e 's/^.*\.\(.*\)$/\\1/' | sort | uniq -c | tr '\n' ',' | sed 's/,$//'".format(
+                    merge_base, branch_name, shortstat, stats
+                )
+            )
+            .read()
+            .strip()
+        )
+
+        print ret
+
+        stats_footer = options["stats-footer"]
+
+        if stats_footer:
+            committers = (
+                os.popen(
+                    "git log {0}..{1} --pretty='%an' --reverse | awk ' !x[$0]++'".format(
+                        merge_base, branch_name
+                    )
+                )
                 .read()
                 .strip()
             )
-            options[work_dir_option] = _work_dir
+            committers = committers.split(os.linesep)
+            committers = ", ".join(committers)
 
-        if not _work_dir or not os.path.exists(_work_dir):
-            _work_dir = False
+            fn = False
 
-        if not _work_dir:
-            if work_dir_global and os.path.exists(work_dir_global):
-                _work_dir = work_dir_global
-            else:
-                _work_dir = False
+            if stats_footer.startswith("`"):
+                stats_footer = stats_footer[1:]
+                fn = True
 
-    return _work_dir
+            footer_tpl = Template(stats_footer)
+
+            committers = committers.decode("utf-8")
+
+            pr_obj = pull_request.copy()
+            pr_obj.update(
+                {
+                    "merge_base": merge_base[0:8],
+                    "branch_name": branch_name,
+                    "committers": committers,
+                    "NEWLINE": os.linesep,
+                }
+            )
+
+            footer_result = footer_tpl.safe_substitute(**pr_obj)
+
+            if fn:
+                footer_result = (
+                    os.popen(footer_result.encode("utf-8"))
+                    .read()
+                    .strip()
+                    .decode("utf-8")
+                )
+
+            print footer_result
+
+        print
+    else:
+        pull_requests = get_pull_requests(repo_name, options["filter-by-update-branch"])
+
+        for pull_request in pull_requests:
+            get_pr_stats(repo_name, pull_request)
 
 
 def get_pull_request(repo_name, pull_request_ID):
@@ -1487,12 +1413,91 @@ def get_repo_url(pull_request, repo_name, force=False):
     return repo_url
 
 
-def get_api_url(command):
-    return URL_BASE % command
-
-
 def get_tmp_path(filename):
     return TMP_PATH % filename
+
+
+def get_user_email(github_user_info):
+    email = None
+
+    if "email" in github_user_info:
+        email = github_user_info["email"]
+
+        if email != None and email.endswith("@liferay.com"):
+            email = email[:-12]
+
+            if email.isdigit():
+                email = None
+        else:
+            email = None
+
+    if email == None:
+        if (
+            "name" in github_user_info
+            and github_user_info["name"] != None
+            and " " in github_user_info["name"]
+        ):
+            email = github_user_info["name"].lower()
+            email = email.replace(" ", ".")
+            email = email.replace("(", ".")
+            email = email.replace(")", ".")
+
+            email = re.sub("\.+", ".", email)
+
+            # Unicode characters usually do not appear in Liferay emails, so
+            # we'll replace them with the closest ASCII equivalent
+
+            email = email.replace(u"\u00e1", "a")
+            email = email.replace(u"\u00e3", "a")
+            email = email.replace(u"\u00e9", "e")
+            email = email.replace(u"\u00f3", "o")
+            email = email.replace(u"\u00fd", "y")
+            email = email.replace(u"\u0107", "c")
+            email = email.replace(u"\u010d", "c")
+            email = email.replace(u"\u0151", "o")
+            email = email.replace(u"\u0161", "s")
+
+    return email
+
+
+def get_work_dir():
+    global _work_dir
+
+    if _work_dir == None:
+        symbolic_ref = (
+            os.popen("git symbolic-ref HEAD").read().strip().replace("refs/heads/", "")
+        )
+        work_dir_global = options["work-dir"]
+
+        work_dir_option = None
+
+        if symbolic_ref:
+            work_dir_option = "work-dir-%s" % symbolic_ref
+
+        if work_dir_option:
+            _work_dir = (
+                os.popen("git config git-pull-request.%s" % work_dir_option)
+                .read()
+                .strip()
+            )
+            options[work_dir_option] = _work_dir
+
+        if not _work_dir or not os.path.exists(_work_dir):
+            _work_dir = False
+
+        if not _work_dir:
+            if work_dir_global and os.path.exists(work_dir_global):
+                _work_dir = work_dir_global
+            else:
+                _work_dir = False
+
+    return _work_dir
+
+
+def github_json_request(url, params=None, authenticate=True):
+    data = json.loads(github_request(url, params, authenticate))
+
+    return data
 
 
 def github_request(url, params=None, authenticate=True):
@@ -1539,12 +1544,6 @@ def github_request(url, params=None, authenticate=True):
 
     if data == "":
         raise UserWarning("Invalid response from github")
-
-    return data
-
-
-def github_json_request(url, params=None, authenticate=True):
-    data = json.loads(github_request(url, params, authenticate))
 
     return data
 
@@ -1607,74 +1606,22 @@ def load_users(filename):
     return github_users
 
 
-def meta(key=None, value=None):
-    branch_name = get_current_branch_name(False)
-
-    pull_request_ID = get_pull_request_ID(branch_name)
-
-    val = None
-
-    if pull_request_ID is not None:
-        meta_data_path = get_tmp_path("git-pull-request-treeish-%s" % pull_request_ID)
-
-        try:
-            f = open(meta_data_path, "r+")
-            current_value = json.load(f)
-            current_obj = current_value
-
-            val = current_value
-
-            if key != None:
-                pieces = key.split(".")
-
-                key = pieces.pop()
-
-                for word in pieces:
-                    current_obj = current_obj[word]
-
-                if value == None:
-                    if key in current_obj:
-                        val = current_obj[key]
-                    else:
-                        val = ""
-
-            if value != None:
-                val = value
-                current_obj[key] = value
-                f.seek(0)
-                f.truncate(0)
-                json.dump(current_value, f)
-
-            f.close()
-
-            return val
-
-        except Exception, e:
-            log("Could not update '%s' with '%s'" % (key, value))
+def log(*args):
+    for arg in args:
+        print json.dumps(arg, sort_keys=True, indent=4)
+        print "/---"
 
 
-def update_meta():
-    branch_name = get_current_branch_name()
-    update_branch_option = options["update-branch"]
-    parent_commit = (
-        os.popen("git merge-base %s %s" % (update_branch_option, branch_name))
-        .read()
-        .strip()[0:10]
-    )
-    head_commit = os.popen("git rev-parse HEAD").read().strip()[0:10]
+def lookup_alias(key):
+    user_alias = key
 
-    updated = {"parent_commit": parent_commit, "head_commit": head_commit}
+    try:
+        if users and (key in users) and users[key]:
+            user_alias = users[key]
+    except Exception, e:
+        pass
 
-    meta("updated", updated)
-
-    if parent_commit == head_commit:
-        branch_treeish = head_commit
-    else:
-        branch_treeish = "%s..%s" % (parent_commit, head_commit)
-
-    print color_text("Original commits: %s" % branch_treeish, "status")
-
-    return branch_treeish
+    return user_alias
 
 
 def main():
@@ -1920,16 +1867,50 @@ def main():
             command_fetch(repo_name, args[0], fetch_auto_update)
 
 
-def lookup_alias(key):
-    user_alias = key
+def meta(key=None, value=None):
+    branch_name = get_current_branch_name(False)
 
-    try:
-        if users and (key in users) and users[key]:
-            user_alias = users[key]
-    except Exception, e:
-        pass
+    pull_request_ID = get_pull_request_ID(branch_name)
 
-    return user_alias
+    val = None
+
+    if pull_request_ID is not None:
+        meta_data_path = get_tmp_path("git-pull-request-treeish-%s" % pull_request_ID)
+
+        try:
+            f = open(meta_data_path, "r+")
+            current_value = json.load(f)
+            current_obj = current_value
+
+            val = current_value
+
+            if key != None:
+                pieces = key.split(".")
+
+                key = pieces.pop()
+
+                for word in pieces:
+                    current_obj = current_obj[word]
+
+                if value == None:
+                    if key in current_obj:
+                        val = current_obj[key]
+                    else:
+                        val = ""
+
+            if value != None:
+                val = value
+                current_obj[key] = value
+                f.seek(0)
+                f.truncate(0)
+                json.dump(current_value, f)
+
+            f.close()
+
+            return val
+
+        except Exception, e:
+            log("Could not update '%s' with '%s'" % (key, value))
 
 
 def open_URL(url):
@@ -2003,10 +1984,28 @@ def update_branch(branch_name):
     complete_update(branch_name)
 
 
-def log(*args):
-    for arg in args:
-        print json.dumps(arg, sort_keys=True, indent=4)
-        print "/---"
+def update_meta():
+    branch_name = get_current_branch_name()
+    update_branch_option = options["update-branch"]
+    parent_commit = (
+        os.popen("git merge-base %s %s" % (update_branch_option, branch_name))
+        .read()
+        .strip()[0:10]
+    )
+    head_commit = os.popen("git rev-parse HEAD").read().strip()[0:10]
+
+    updated = {"parent_commit": parent_commit, "head_commit": head_commit}
+
+    meta("updated", updated)
+
+    if parent_commit == head_commit:
+        branch_treeish = head_commit
+    else:
+        branch_treeish = "%s..%s" % (parent_commit, head_commit)
+
+    print color_text("Original commits: %s" % branch_treeish, "status")
+
+    return branch_treeish
 
 
 if __name__ == "__main__":
